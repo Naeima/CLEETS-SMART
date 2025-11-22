@@ -24,6 +24,8 @@ from shapely.ops import split as shp_split
 import folium
 from folium.plugins import MarkerCluster, Draw, BeautifyIcon
 from folium.raster_layers import WmsTileLayer
+from folium.plugins import AntPath, PolyLineTextPath
+
 
 # 3D map (optional)
 MAPBOX_API_KEY = os.environ.get("pk.eyJ1IjoibmFlaW1hIiwiYSI6ImNsNDRoa295ZDAzMmkza21tdnJrNWRqNmwifQ.-cUTmhr1Q03qUXJfQoIKGQ", "").strip()
@@ -88,8 +90,106 @@ def geocode_start_end(start_pc_or_text: str, end_pc_or_text: str):
 # Config
 # =========================
 EV_GDRIVE_FILE_ID = "1RFtC5hSEIrg5yG1rkmfD8JasAK6h212K"  # https://drive.google.com/file/d/1RFtC5hSEIrg5yG1rkmfD8JasAK6h212K/view?usp=sharing
-LOCAL_EV_CSV = "south_wales_ev.csv"
+LOCAL_EV_CSV = "SouthWales.csv"
 CACHE_DIR = ".cache_wfs"; os.makedirs(CACHE_DIR, exist_ok=True)
+
+# ---- Performance caches (graphs + flood unions) ----
+GRAPH_CACHE_DIR = os.path.join(CACHE_DIR, "graphs"); os.makedirs(GRAPH_CACHE_DIR, exist_ok=True)
+FLOOD_CACHE_DIR = os.path.join(CACHE_DIR, "flood_unions"); os.makedirs(FLOOD_CACHE_DIR, exist_ok=True)
+
+def _ox_save_graphml(G, path):
+    try:
+        import osmnx as ox
+        return ox.io.save_graphml(G, path)
+    except Exception:
+        try:
+            return ox.save_graphml(G, path)
+        except Exception:
+            return None
+
+def _ox_load_graphml(path):
+    try:
+        import osmnx as ox
+        return ox.io.load_graphml(path)
+    except Exception:
+        try:
+            return ox.load_graphml(path)
+        except Exception:
+            return None
+
+def _graph_point_cache_path(lat, lon, dist_m):
+    return os.path.join(GRAPH_CACHE_DIR, f"pt_{round(lat,5)}_{round(lon,5)}_{int(dist_m)}.graphml")
+
+def _graph_bbox_cache_path(north, south, east, west):
+    key = f"bbox_{round(north,5)}_{round(south,5)}_{round(east,5)}_{round(west,5)}.graphml"
+    return os.path.join(GRAPH_CACHE_DIR, key)
+
+def graph_from_point_cached(lat, lon, dist_m=15000, ttl_days=30):
+    if not HAS_OSMNX:
+        raise RuntimeError("OSMnx not installed")
+    path = _graph_point_cache_path(lat, lon, dist_m)
+    if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < ttl_days*86400:
+        G = _ox_load_graphml(path)
+        if G is not None:
+            return G
+    G = ox.graph_from_point((lat, lon), dist=dist_m, network_type="drive", simplify=True)
+    try: _ox_save_graphml(G, path)
+    except Exception: pass
+    return G
+
+def graph_from_bbox_cached(north, south, east, west, ttl_days=30):
+    if not HAS_OSMNX:
+        raise RuntimeError("OSMnx not installed")
+    path = _graph_bbox_cache_path(north, south, east, west)
+    if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < ttl_days*86400:
+        G = _ox_load_graphml(path)
+        if G is not None:
+            return G
+    # Try several OSMnx signatures
+    try:
+        G = ox.graph_from_bbox(north=north, south=south, east=east, west=west, network_type="drive", simplify=True)
+    except TypeError:
+        try:
+            G = ox.graph_from_bbox((north, south, east, west), network_type="drive", simplify=True)
+        except TypeError:
+            G = ox.graph_from_bbox(north, south, east, west, "drive", True)
+    try: _ox_save_graphml(G, path)
+    except Exception: pass
+    return G
+
+def _flood_union_cache_path(bounds, include_live, include_fraw, include_fmfp, pad_m):
+    (s,w,n,e) = bounds
+    key = f"fu_{round(s,3)}_{round(w,3)}_{round(n,3)}_{round(e,3)}_{int(pad_m)}_{int(include_live)}{int(include_fraw)}{int(include_fmfp)}.wkb"
+    return os.path.join(FLOOD_CACHE_DIR, key)
+
+def get_flood_union_cached(bounds, include_live=True, include_fraw=True, include_fmfp=True, pad_m=None, ttl_days=7):
+    import shapely
+    from shapely import wkb as _wkb_mod
+    if pad_m is None:
+        pad_m = SIM_DEFAULTS.get("wfs_pad_m", 250)
+    p = _flood_union_cache_path(bounds, include_live, include_fraw, include_fmfp, pad_m)
+    if os.path.exists(p) and (time.time() - os.path.getmtime(p)) < ttl_days*86400:
+        try:
+            with open(p, "rb") as f:
+                wkb = f.read()
+            try:
+                geom = shapely.from_wkb(wkb)   # Shapely ≥2
+            except Exception:
+                geom = _wkb_mod.loads(wkb)     # Shapely 1.x
+            return geom
+        except Exception:
+            pass
+    geom = get_flood_union(bounds, include_live=include_live, include_fraw=include_fraw, include_fmfp=include_fmfp, pad_m=pad_m)
+    try:
+        if geom is not None:
+            with open(p, "wb") as f:
+                try:
+                    f.write(shapely.to_wkb(geom))  # Shapely ≥2
+                except Exception:
+                    f.write(_wkb_mod.dumps(geom))  # Shapely 1.x
+    except Exception:
+        pass
+    return geom
 
 # Logo from Google Drive (provided by you)
 LOGO_GDRIVE_FILE_OR_URL = "https://drive.google.com/file/d/1QLQPln4dRyWXh65E5ua_rC3CGTChwKxc/view?usp=sharing"
@@ -131,8 +231,11 @@ SIM_DEFAULTS = dict(
     end_lat=51.6214,   end_lon=-3.9436,    # Swansea
     battery_kwh=64.0, init_soc=90.0, reserve_soc=10.0, target_soc=80.0,
     kwh_per_km=0.18, max_charger_offset_km=1.5, min_leg_km=20.0,
-    route_buffer_m=30, wfs_pad_m=800
+    route_buffer_m=30, wfs_pad_m=800, wfs_pad_m_fast=120, soc_step_normal=0.05, soc_step_fast=0.10
 )
+
+# Global fast-mode default (overridden per-call). Set ONS_FAST_MODE=1 to enable globally.
+FAST_MODE_DEFAULT = bool(int(os.getenv("ONS_FAST_MODE", "0")))
 
 # RCSP knobs
 SOC_STEP = 0.05
@@ -536,7 +639,7 @@ def segment_route_by_risk(line_wgs84, risk_union_metric, buffer_m=ROUTE_BUFFER_M
 # =========================
 def fetch_graph_and_chargers(center_lat, center_lon, dist_m=15000):
     """OSMnx graph + OSM charging POIs (amenity=charging_station)."""  # :contentReference[oaicite:5]{index=5}
-    G = ox.graph_from_point((center_lat, center_lon), dist=dist_m, network_type="drive", simplify=True)
+    G = graph_from_point_cached(center_lat, center_lon, dist_m)
     try:
         pois = ox.geometries_from_point((center_lat, center_lon),
                                         tags={"amenity": "charging_station"}, dist=dist_m)
@@ -567,10 +670,7 @@ def _build_graph_bbox(north, south, east, west):
     """
     # 1) Newer OSMnx (≥1.9): keyword-only north/south/east/west
     try:
-        return ox.graph_from_bbox(
-            north=north, south=south, east=east, west=west,
-            network_type="drive", simplify=True
-        )
+        return graph_from_bbox_cached(north, south, east, west)
     except TypeError:
         pass
 
@@ -592,8 +692,8 @@ def _build_graph_bbox(north, south, east, west):
 
 def _graph_two_points(sl, so, el, eo, dist_m=15000):
     # Build two local graphs around start/end and merge them
-    G1 = ox.graph_from_point((sl, so), dist=dist_m, network_type="drive", simplify=True)
-    G2 = ox.graph_from_point((el, eo), dist=dist_m, network_type="drive", simplify=True)
+    G1 = graph_from_point_cached(sl, so, dist_m)
+    G2 = graph_from_point_cached(el, eo, dist_m)
     try:
         return nx.compose(G1, G2)
     except Exception:
@@ -605,7 +705,7 @@ def _graph_two_points(sl, so, el, eo, dist_m=15000):
 def rcsp_optimize(start_lat, start_lon, end_lat, end_lon,
                   battery_kwh, init_soc, reserve_soc, target_soc,
                   kwh_per_km, chargers_df, flood_union_m, extreme=False,
-                  risk_penalty_per_km=None, max_seconds=5.0):
+                  risk_penalty_per_km=None, max_seconds=5.0, soc_step=None):
     if not HAS_OSMNX:
         raise RuntimeError("OSMnx not installed")
 
@@ -692,7 +792,7 @@ def rcsp_optimize(start_lat, start_lon, end_lat, end_lon,
                 continue
 
     # ---- RCSP over (node, discretised SOC)
-    step = SOC_STEP
+    step = (soc_step if (soc_step is not None) else SOC_STEP)
     Q = [round(i * step, 2) for i in range(0, int(1 / step) + 1)]
     def q_to_idx(q): return max(0, min(len(Q)-1, int(round(q/step))))
     reserve_q = float(reserve_soc)/100.0
@@ -862,45 +962,48 @@ def rcsp_optimize(start_lat, start_lon, end_lat, end_lon,
 def line_to_latlon_list(line: LineString) -> List[Tuple[float,float]]:
     return [(lat, lon) for lon, lat in line.coords]
 
-def plan_rcsp_route(sl, so, el, eo, ev: EVParams, extreme=False, risk_penalty_per_km=None, rcsp_timeout_s=5.0):
-    """Wrapper that calls rcsp_optimize and converts its outputs to UI-friendly objects."""
-    if not HAS_OSMNX:
-        raise RuntimeError("OSMnx not available")
+def plan_rcsp_route(sl, so, el, eo, ev: EVParams, extreme=False,
+                    risk_penalty_per_km=None, rcsp_timeout_s=5.0, fast_mode=None):
+    if fast_mode is None:
+        fast_mode = FAST_MODE_DEFAULT
+    soc_step = (SIM_DEFAULTS.get("soc_step_fast", 0.10) if fast_mode else SIM_DEFAULTS.get("soc_step_normal", 0.05))
 
+    # ---- Charger candidates: try OSMnx, otherwise fall back to empty set
+    chargers_df = pd.DataFrame(columns=["ROW_ID","Latitude","Longitude","Name","AvailabilityLabel","power_kW"])
     ctr_lat, ctr_lon = (sl+el)/2.0, (so+eo)/2.0
-    _G, chargers_df = fetch_graph_and_chargers(ctr_lat, ctr_lon, dist_m=20000)
+    if HAS_OSMNX:
+        try:
+            _G, chargers_df = fetch_graph_and_chargers(ctr_lat, ctr_lon, dist_m=20000)
+        except Exception:
+            pass  # keep empty chargers_df
+    # Optionally prefer your ONS/NCR set nearby (keep inside a try; ignore errors)
     try:
-        # Prefer ONS/NCR set within a radius if available (uses global gdf_ev prepared earlier)
-        if 'gdf_ev' in globals():
-            import geopandas as gpd
-            from shapely.geometry import Point
+        if 'gdf_ev' in globals() and not gdf_ev.empty:
             center_pt = gpd.GeoSeries([Point(ctr_lon, ctr_lat)], crs="EPSG:4326")
             radius_m = 20000
             ev_local = gdf_ev.to_crs('EPSG:27700')
             mask = ev_local.geometry.distance(center_pt.to_crs('EPSG:27700').iloc[0]) <= radius_m
-            subset = gdf_ev.loc[mask.values]
+            subset = gdf_ev.loc[mask.values].copy()
             if not subset.empty:
-                out = subset.copy()
-                out['Latitude'] = out.geometry.y
-                out['Longitude'] = out.geometry.x
-                # Normalize power column names to 'power_kW' if present
+                subset['Latitude'] = subset.geometry.y
+                subset['Longitude'] = subset.geometry.x
                 for cand in ['power_kw','Power_kW','rated_power_kw','RatedPowerKW','connector_power_kw']:
-                    if cand in out.columns:
-                        out = out.rename(columns={cand:'power_kW'})
+                    if cand in subset.columns:
+                        subset = subset.rename(columns={cand:'power_kW'})
                         break
-                # Minimal schema for RCSP
                 keep = ['Latitude','Longitude','Name','ROW_ID','AvailabilityLabel','power_kW']
                 for col in keep:
-                    if col not in out.columns:
-                        out[col] = None
-                chargers_df = out[keep].reset_index(drop=True)
+                    if col not in subset.columns:
+                        subset[col] = None
+                chargers_df = subset[keep].reset_index(drop=True)
     except Exception:
         pass
 
-    # Build flood union (metric CRS) from WFS layers over the OD bounding box
+    # ---- Flood union cached (fail-safe)
     try:
-        bounds = (min(sl, el), min(so, eo), max(sl, el), max(so, eo))  # (south, west, north, east)
-        flood_union_m = get_flood_union(bounds, include_live=True, include_fraw=True, include_fmfp=True, pad_m=SIM_DEFAULTS["wfs_pad_m"])
+        bounds = (min(sl, el), min(so, eo), max(sl, el), max(so, eo))
+        flood_union_m = get_flood_union_cached(bounds, True, True, True,
+                                               pad_m=(SIM_DEFAULTS["wfs_pad_m_fast"] if fast_mode else SIM_DEFAULTS["wfs_pad_m"]))
     except Exception:
         flood_union_m = None
 
@@ -909,7 +1012,7 @@ def plan_rcsp_route(sl, so, el, eo, ev: EVParams, extreme=False, risk_penalty_pe
             sl, so, el, eo,
             ev.battery_kWh, ev.start_soc*100, ev.reserve_soc*100, ev.target_soc*100,
             ev.kWh_per_km, chargers_df, flood_union_m, extreme=extreme,
-            risk_penalty_per_km=risk_penalty_per_km, max_seconds=rcsp_timeout_s
+            risk_penalty_per_km=risk_penalty_per_km, max_seconds=rcsp_timeout_s, soc_step=soc_step
         )
         used_src = "RCSP"
         dist_m = float(line.length)*111000.0 if hasattr(line, "length") else None
@@ -1080,97 +1183,132 @@ def render_map_html_ev(df_map, show_fraw, show_fmfp, show_live, show_ctx, light=
     return m.get_root().render()
 
 def render_map_html_route(full_line, route_safe, route_risk, start, end, chargers,
-                          all_chargers_df=None,  # <--- new argument
-                          animate=False, speed_kmh=50, show_live_backdrops=False):
-    m = folium.Map(location=[(start[0]+end[0])/2, (start[1]+end[1])/2], zoom_start=11,
-                   tiles=None, control_scale=True)
+                          all_chargers_df=None,
+                          animate=True,            # default: show animated path
+                          speed_kmh=50,
+                          show_live_backdrops=False):
+    """
+    Clearer map styling:
+      - route 'glow' (white halo) + colored core
+      - optional animated AntPath
+      - risk segments in solid red
+      - recommended charging stops highlighted and numbered
+    """
+    m = folium.Map(location=[(start[0]+end[0])/2, (start[1]+end[1])/2],
+                   zoom_start=11, tiles=None, control_scale=True)
     add_base_tiles(m)
 
-    # --- Plot all charging stations (clustered by risk zone) ---
-    if all_chargers_df is not None:
-        red_group   = folium.FeatureGroup(name="All Chargers: Zone 3 / High (red)", show=True).add_to(m)
-        amber_group = folium.FeatureGroup(name="All Chargers: Zone 2 / Medium (amber)", show=True).add_to(m)
-        green_group = folium.FeatureGroup(name="All Chargers: Zone 1 / Low–Outside (green)", show=True).add_to(m)
-
-        red_cluster   = MarkerCluster(name="Cluster: Zone 3 / High").add_to(red_group)
-        amber_cluster = MarkerCluster(name="Cluster: Zone 2 / Medium").add_to(amber_group)
-        green_cluster = MarkerCluster(name="Cluster: Zone 1 / Low–Outside").add_to(green_group)
-
+    # ---- All chargers as faint background (optional) ----
+    if all_chargers_df is not None and not all_chargers_df.empty:
+        bg = folium.FeatureGroup(name="All charging points (context)", show=False).add_to(m)
         for _, row in all_chargers_df.iterrows():
+            lat, lon = float(row["Latitude"]), float(row["Longitude"])
             zlabel = (row.get("ZoneLabel") or "Outside")
-            if zlabel in ("Zone 3","High"):
-                color_hex = ZONE_COLORS["Zone 3"]; group_cluster = red_cluster
-            elif zlabel in ("Zone 2","Medium"):
-                color_hex = ZONE_COLORS["Zone 2"]; group_cluster = amber_cluster
-            else:
-                color_hex = ZONE_COLORS["Outside"]; group_cluster = green_cluster
+            color_hex = (ZONE_COLORS["Zone 3"] if zlabel in ("Zone 3","High")
+                         else ZONE_COLORS["Zone 2"] if zlabel in ("Zone 2","Medium")
+                         else ZONE_COLORS["Outside"])
+            folium.CircleMarker([lat, lon],
+                                radius=3, weight=0, fill=True, fill_opacity=0.6,
+                                fill_color=color_hex).add_to(bg)
 
-            title = f"{row.get('Operator','')} ({row.get('country','')})"
-            try:
-                tooltip_html = _row_to_tooltip_html(row, title=title)
-                tooltip_obj = folium.Tooltip(tooltip_html, sticky=True)
-            except Exception:
-                tooltip_obj = title
+    # ---- Helpers ----
+    def _coords(line):
+        return [(lat, lon) for lon, lat in getattr(line, "coords", [])] if line is not None else []
 
-            marker = folium.Marker([row['Latitude'], row['Longitude']],
-                                   tooltip=tooltip_obj,
-                                   icon=make_beautify_icon(color_hex))
-            group_cluster.add_child(marker)
+    def _glow_line(coords, core_color, name):
+        # white halo
+        folium.PolyLine(coords, color="#ffffff", weight=10, opacity=0.7).add_to(m)
+        # colored core
+        folium.PolyLine(coords, color=core_color, weight=6, opacity=0.95, tooltip=name).add_to(m)
 
-    # Route lines
-    def add_lines(lines, color, name):
-        if not lines: return
-        fg = folium.FeatureGroup(name=name).add_to(m)
-        for ln in lines:
-            coords = [(lat,lon) for lon,lat in ln.coords]
-            folium.PolyLine(coords, color=color, weight=6, opacity=0.9).add_to(fg)
-
-    # Whole route (faint for context)
+    # ---- Whole route (context + animation) ----
     if isinstance(full_line, LineString):
-        coords_full = [(lat,lon) for lon,lat in full_line.coords]
-        folium.PolyLine(coords_full, color="#999999", weight=3, opacity=0.5, tooltip="Planned route").add_to(m)
+        coords_full = _coords(full_line)
+        _glow_line(coords_full, "#1f78b4", "Planned route")
+        if animate and coords_full:
+            AntPath(locations=coords_full, delay=800, dash_array=[8, 16],
+                    weight=3, opacity=0.7, color="#1f78b4").add_to(m)
+            try:
+                PolyLineTextPath(folium.PolyLine(coords_full),
+                                 text="   ▶   ", repeat=True, offset=10,
+                                 attributes={"font-size": "14", "fill": "#1f78b4"}).add_to(m)
+            except Exception:
+                pass
 
-    add_lines(route_safe, "#2b8cbe", "Route – safe")
-    add_lines(route_risk, "#e31a1c", "Route – flood risk")
-    folium.Marker(start, tooltip="Start", icon=folium.Icon(color="green")).add_to(m)
-    folium.Marker(end,   tooltip="End",   icon=folium.Icon(color="blue")).add_to(m)
+    # ---- Risk segments (solid red, on top) ----
+    if route_risk:
+        for seg in route_risk:
+            coords = _coords(seg)
+            if not coords: continue
+            _glow_line(coords, "#e31a1c", "Route – flood risk")
 
-    # Highlight planned stops (simulate stops) on top (with bold border)
-    cluster = MarkerCluster(name="Planned route stops").add_to(m)
-    for st in chargers:
-        try:
-            row = gdf_ev.loc[gdf_ev['ROW_ID'].eq(st.get('ROW_ID',-1))].iloc[0]
-        except Exception:
-            continue
-        zlabel = (row.get('ZoneLabel') or 'Outside')
-        if zlabel in ('Zone 3','High'):   color_hex = ZONE_COLORS['Zone 3']
-        elif zlabel in ('Zone 2','Medium'): color_hex = ZONE_COLORS['Zone 2']
-        else:                               color_hex = ZONE_COLORS['Outside']
-        title = f"{row.get('Operator','')} ({row.get('country','')})"
-        try:
-            tooltip_html = _row_to_tooltip_html(row, title=title)
-            tooltip_obj = folium.Tooltip(tooltip_html, sticky=True)
-        except Exception:
-            tooltip_obj = title
-        # Mark planned stops with a bold border
-        folium.Marker([row['Latitude'], row['Longitude']], tooltip=tooltip_obj,
-                      icon=make_beautify_icon(color_hex)).add_to(cluster)
+    # ---- Safe segments (blue, on top of context) ----
+    if route_safe:
+        for seg in route_safe:
+            coords = _coords(seg)
+            if not coords: continue
+            _glow_line(coords, "#2b8cbe", "Route – safe")
+
+    # ---- Start / End markers ----
+    folium.Marker(start, tooltip="Start",
+                  icon=folium.Icon(color="green", icon="play", prefix="fa")).add_to(m)
+    folium.Marker(end, tooltip="End",
+                  icon=folium.Icon(color="blue", icon="flag-checkered", prefix="fa")).add_to(m)
+
+    # ---- Recommended charging stops (numbered; Stop 1 highlighted with a star) ----
+    if chargers:
+        grp = folium.FeatureGroup(name="Recommended charging stops", show=True).add_to(m)
+        for j, st in enumerate(chargers, 1):
+            lat, lon = float(st["lat"]), float(st["lon"])
+            name = st.get("name") or f"Stop {j}"
+            zhex = st.get("ZoneColor") or "#2E7D32"
+
+            # First (primary) stop: star icon, bigger
+            if j == 1:
+                folium.Marker([lat, lon],
+                              tooltip=f"Stop {j}: {name}",
+                              icon=folium.Icon(color="red", icon="star", prefix="fa")).add_to(grp)
+                folium.CircleMarker([lat, lon], radius=10, color=zhex, weight=3,
+                                    fill=True, fill_opacity=0.15).add_to(grp)
+            else:
+                # Numbered badge + bolt
+                try:
+                    folium.map.Marker(
+                        [lat, lon],
+                        tooltip=f"Stop {j}: {name}",
+                        icon=BeautifyIcon(
+                            icon="bolt",
+                            number=str(j),
+                            icon_shape="marker",
+                            border_color="#333333",
+                            border_width=3,
+                            background_color=zhex,
+                            text_color="white",
+                            inner_icon_style="font-size:18px;padding-top:2px;"
+                        )
+                    ).add_to(grp)
+                except Exception:
+                    folium.Marker([lat, lon],
+                                  tooltip=f"Stop {j}: {name}",
+                                  icon=folium.Icon(color="orange", icon="bolt", prefix="fa")).add_to(grp)
 
     if show_live_backdrops:
         add_wms_group(m, LIVE_WMS, visible=True, opacity=0.65)
 
     folium.LayerControl(collapsed=True).add_to(m)
 
+    # Legend (compact)
     legend_html = """
     <div style="position: fixed; bottom:20px; left:20px; z-index:9999; background:white; padding:10px 12px; border:1px solid #ccc; border-radius:6px; font-size:13px;">
-      <b>Charger icon colour — Flood model zone</b>
-      <div style="margin-top:6px"><span style="display:inline-block;width:12px;height:12px;background:#D32F2F;margin-right:6px;"></span> Red: Zone 3 / High</div>
-      <div><span style="display:inline-block;width:12px;height:12px;background:#FFC107;margin-right:6px;"></span> Amber: Zone 2 / Medium</div>
-      <div><span style="display:inline-block;width:12px;height:12px;background:#2E7D32;margin-right:6px;"></span> Green: Zone 1 / Low–Very Low / Outside</div>
+      <b>Route & Chargers</b>
+      <div style="margin-top:6px"><span style="display:inline-block;width:12px;height:12px;background:#1f78b4;margin-right:6px;border:1px solid #555;"></span> Route (safe)</div>
+      <div><span style="display:inline-block;width:12px;height:12px;background:#e31a1c;margin-right:6px;border:1px solid #555;"></span> Route (flood risk)</div>
+      <div style="margin-top:6px">★ Stop 1 highlighted (recommended)</div>
     </div>
     """
     m.get_root().html.add_child(folium.Element(legend_html))
     return m.get_root().render()
+
 
 # =========================
 # Dash app + header logo + KML download
@@ -1507,7 +1645,7 @@ app.layout = html.Div([
             html.Iframe(
                 id="map",
                 srcDoc="<html><body style='font-family:sans-serif;padding:10px'>Loading…</body></html>",
-                style={"width": "100%","height": "620px","border": "1px solid #ddd","borderRadius": "8px"}
+                style={"width": "100%","height": "80vh","border": "1px solid #ddd","borderRadius": "8px"}
             )
         ),
 
@@ -1667,465 +1805,113 @@ def _apply_vehicle_preset(cat, model):
     Output("map", "srcDoc"),
     Output("itinerary", "children"),
     Output("store-route", "data"),
-    # EV filters + overlays
+    # --- existing Inputs for filters/overlays ---
     Input("f-country", "value"),
     Input("f-country-like", "value"),
     Input("f-op", "value"),
     Input("layers", "value"),
     Input("light", "value"),
-    Input("store-zones", "data"),
     Input("overlay-refresh-token", "data"),
-    # Simulation trigger + params — USE EXISTING IDS FROM LAYOUT
+    # --- routing trigger + EV params ---
     Input("simulate", "n_clicks"),
     State("sla","value"), State("slo","value"),
     State("ela","value"), State("elo","value"),
-    State("batt","value"),  State("si","value"),
-    State("sres","value"),  State("stgt","value"),
+    State("batt","value"), State("si","value"),
+    State("sres","value"), State("stgt","value"),
     State("kwhkm","value"), State("pmax","value"),
     State("show_leg_details","value"),
     State("units","value"),
-    State("map-mode","value"),
-    # Trigger once on load
-    Input("init","n_intervals"),
+    prevent_initial_call=True
 )
-def _update_map(countrys, country_like, op_vals, layers_vals, light_vals, zones_json, _tok,
-                sim_clicks, sla, slo, ela, elo, batt, si, sres, stgt, kwhkm, pmax,
-                show_leg_details, units, map_mode, _init_n):
+def _map_or_route(country_vals, country_like, fop_vals, layer_vals, light_vals, _tok,
+                  n_sim, sla, slo, ela, elo, batt, si, sres, stgt, kwhkm, pmax, show_details, units):
+    # Which control fired?
+    trig = (dash.callback_context.triggered[0]["prop_id"].split(".")[0]
+            if dash.callback_context.triggered else "")
 
-
-    light = "on" in (light_vals or [])
-
-    # Base dataset + zone join (skip heavy WFS in light mode unless user pressed Compute)
-    d = gdf_ev.copy()
-    zones_df = None
-    if zones_json and zones_json != "[]":
+    # ---- Branch 1: routing (Simulate clicked) ----
+    if trig == "simulate":
         try:
-            zextra = pd.read_json(StringIO(zones_json))
-            if {"ROW_ID","ZoneLabel","ZoneColor"}.issubset(zextra.columns) and not zextra.empty:
-                zones_df = zextra[["ROW_ID","ZoneLabel","ZoneColor"]]
-        except Exception:
-            pass
-    if zones_df is None:
-        if light:
-            zones_df = pd.DataFrame({"ROW_ID": gdf_ev["ROW_ID"],
-                                     "ZoneLabel": "Outside",
-                                     "ZoneColor": ZONE_COLORS["Outside"]})
-        else:
-            zones_df = safe_compute_zones()
-
-    d = d.merge(zones_df, on="ROW_ID", how="left")
-    d["ZoneLabel"] = d["ZoneLabel"].fillna("Outside")
-    d["ZoneColor"] = d["ZoneColor"].fillna(ZONE_COLORS["Outside"])
-
-    # Filters
-    if countrys:
-        d = d[d['country'].isin(countrys)]
-    else:
-        d = gdf_ev.copy()  # Always plot all if nothing selected
-    if country_like:
-        s = str(country_like).strip().lower()
-        if s: d = d[d['country'].str.lower().str.contains(s, na=False)]
-    op_vals = set(op_vals or [])
-    if op_vals and len(op_vals) < 3:
-        mask = pd.Series(False, index=d.index)
-        if "op" in op_vals:   mask |= d['AvailabilityLabel'].eq("Operational")
-        if "down" in op_vals: mask |= d['AvailabilityLabel'].eq("Not operational")
-        if "unk" in op_vals:  mask |= d['AvailabilityLabel'].eq("Unknown") | d['AvailabilityLabel'].isna()
-        d = d[mask]
-
-    # Overlays
-    layers_vals = set(layers_vals or [])
-    show_fraw = "fraw" in layers_vals
-    show_fmfp = "fmfp" in layers_vals
-    show_live = "live" in layers_vals
-    show_ctx  = "ctx"  in layers_vals
-
-    itinerary_children = html.Div()
-    route_store = {}
-
-    # Route mode
-    
-    if sim_clicks:
-        try:
-            # Optional heavy risk union (skip in light mode)
-            flood_union_m = None
-            if not light:
-                bounds = (min(slo,elo), min(sla,ela), max(slo,elo), max(sla,ela))
-                flood_union_m = get_flood_union(bounds, include_live=True, include_fraw=True, include_fmfp=True,
-                                                pad_m=SIM_DEFAULTS["wfs_pad_m"])
-
-            # ---- Preferred: RCSP over OSM graph (true OSM road line + flood-aware penalties) ----
-            if HAS_OSMNX:
-                line, safe_lines, risk_lines, stops, total_cost = rcsp_optimize(
-                    float(sla), float(slo), float(ela), float(elo),
-                    float(batt), float(si), float(sres), float(stgt),
-                    float(kwhkm), d if not d.empty else gdf_ev, flood_union_m, extreme=False
-                )
-
-                if (map_mode or "2d") == "3d":
-                    html_str = render_map_html_ev_3d(
-                        df_map=None, start=(float(sla), float(slo)), end=(float(ela), float(elo)),
-                        route_full=line, route_safe=safe_lines, route_risk=risk_lines
-                    )
-                else:
-                    html_str = render_map_html_route(
-                        full_line=line, route_safe=safe_lines, route_risk=risk_lines,
-                        start=(float(sla), float(slo)), end=(float(ela), float(elo)),
-                        chargers=stops, all_chargers_df=None,
-                        animate=False, speed_kmh=45, show_live_backdrops=False
-                    )
-
-                rows = [f"**Routing & charging plan** — RCSP on OSM road network; generalised cost ≈ {total_cost/60:.1f} min"]
-                if stops:
-                    rows.append("---")
-                    for i, st in enumerate(stops, 1):
-                        row = gdf_ev.loc[gdf_ev['ROW_ID'].eq(st['ROW_ID'])].iloc[0]
-                        rows.append(
-                            f"**Stop {i}** — {row.get('Operator','')} ({row.get('country','')}) {row.get('Postcode','')}"
-                            f" • Zone: {row.get('ZoneLabel','Outside')} • +{st['energy_kwh']:.1f} kWh"
-                            f" to {int(100*st['soc_after'])}% in ~{st['charge_time_min']:.0f} min"
-                        )
-                itinerary_children = dcc.Markdown("\n\n".join(rows))
-
-                coords_latlng = [{"lat":lat, "lon":lon} for lon,lat in list(line.coords)]
-                route_store = dict(
-                    start={"lat":float(sla), "lon":float(slo)},
-                    end={"lat":float(ela), "lon":float(elo)},
-                    route=coords_latlng,
-                    stops=[{
-                        "lat": gdf_ev.loc[gdf_ev['ROW_ID'].eq(s['ROW_ID'])].iloc[0]['Latitude'],
-                        "lon": gdf_ev.loc[gdf_ev['ROW_ID'].eq(s['ROW_ID'])].iloc[0]['Longitude'],
-                        "name": gdf_ev.loc[gdf_ev['ROW_ID'].eq(s['ROW_ID'])].iloc[0].get('Operator',"Charger"),
-                        "ZoneColor": gdf_ev.loc[gdf_ev['ROW_ID'].eq(s['ROW_ID'])].iloc[0].get('ZoneColor', ZONE_COLORS["Outside"])
-                    } for s in stops],
-                    created_ts=time.time()
-                )
-                return html_str, itinerary_children, route_store
-
-            # ---- Fallback: OSRM road polyline + greedy charge suggestions ----
-            line, dist_m, dur_s, step_text, src = osrm_route(float(sla), float(slo), float(ela), float(elo))
-
-            stops = osrm_greedy_charge_plan(
-                line,
-                battery_kwh=float(batt),
-                init_soc=float(si),
-                reserve_soc=float(sres),
-                target_soc=float(stgt),
-                kwh_per_km=float(kwhkm),
-                chargers_df=d if not d.empty else gdf_ev,
-                max_charger_offset_km=float(SIM_DEFAULTS["max_charger_offset_km"])
+            ev = EVParams(
+                battery_kWh=float(batt), start_soc=float(si),
+                reserve_soc=float(sres), target_soc=float(stgt),
+                kWh_per_km=float(kwhkm), max_charge_kW=float(pmax)
             )
-
-            safe_lines, risk_lines = segment_route_by_risk(
-                line, flood_union_m, buffer_m=ROUTE_BUFFER_M
+            coords, stops, total_min = plan_rcsp_route(
+                float(sla), float(slo), float(ela), float(elo), ev,
+                extreme=False, rcsp_timeout_s=5.0
             )
+            use_miles = (units == "imperial")
+            to_dist = (lambda km: km*0.621371) if use_miles else (lambda km: km)
+            du = "mi" if use_miles else "km"
+            dist_km = sum(haversine_km(*(coords[i] + coords[i+1])) for i in range(len(coords)-1))
+            total_dist = to_dist(dist_km)
 
-            if (map_mode or "2d") == "3d":
-                html_str = render_map_html_ev_3d(
-                    df_map=d, start=(float(sla), float(slo)), end=(float(ela), float(elo)),
-                    route_full=line, route_safe=safe_lines, route_risk=risk_lines
-                )
-            else:
-                html_str = render_map_html_route(
-                    full_line=line, route_safe=safe_lines, route_risk=risk_lines,
-                    start=(float(sla), float(slo)), end=(float(ela), float(elo)),
-                    chargers=stops, all_chargers_df=d,  # show all chargers plus planned ones
-                    animate=False, speed_kmh=45, show_live_backdrops=False
-                )
+            lines = []
+            lines.append(f"### Journey summary")
+            lines.append(f"- Total time (drive + charge): **~{total_min:.1f} min**")
+            lines.append(f"- Total distance: **{total_dist:.1f} {du}**")
+            lines.append(f"- Charging stops: **{len(stops)}**")
 
-            msg = [f"**Routing & charging plan** — OSRM ({src}) • {dist_m/1000.0:.1f} km • {dur_s/3600.0:.2f} h"]
-            if step_text:
-                msg.append("---")
-                msg.extend([f"- {t}" for t in step_text[:12]])
             if stops:
-                msg.append("---")
-                for i, st in enumerate(stops, 1):
-                    row = gdf_ev.loc[gdf_ev['ROW_ID'].eq(st['ROW_ID'])].iloc[0]
-                    msg.append(
-                        f"**Stop {i}** — {row.get('Operator','')} ({row.get('country','')}) {row.get('Postcode','')}"
-                        f" • +{st['energy_kwh']:.1f} kWh to {int(100*st['soc_after'])}% in ~{st['charge_time_min']:.0f} min"
-                    )
-            itinerary_children = dcc.Markdown("\n".join(msg))
+                s0 = stops[0]
+                lines.append("")
+                lines.append(f"**Recommended charging point (Stop 1): {s0.name}**  ")
+                lines.append(f"- Location: ({s0.lat:.4f}, {s0.lon:.4f}) · Postcode: `{s0.postcode or '—'}`")
+                lines.append(f"- Zone: {s0.ZoneLabel}  · Operational: {'Yes' if s0.Operational else 'No'}")
+                lines.append(f"- Arrive **{int(100*s0.soc_before)}%** → leave **{int(100*s0.soc_after)}%** "
+                            f"(+{s0.energy_kWh:.1f} kWh in ~{s0.charge_time_min:.0f} min)")
 
-            coords_latlng = [{"lat":lat, "lon":lon} for lon,lat in list(line.coords)]
-            route_store = dict(
-                start={"lat":float(sla), "lon":float(slo)},
-                end={"lat":float(ela), "lon":float(elo)},
-                route=coords_latlng,
-                stops=[{
-                    "lat": gdf_ev.loc[gdf_ev['ROW_ID'].eq(s['ROW_ID'])].iloc[0]['Latitude'],
-                    "lon": gdf_ev.loc[gdf_ev['ROW_ID'].eq(s['ROW_ID'])].iloc[0]['Longitude'],
-                    "name": gdf_ev.loc[gdf_ev['ROW_ID'].eq(s['ROW_ID'])].iloc[0].get('Operator',"Charger"),
-                    "ZoneColor": gdf_ev.loc[gdf_ev['ROW_ID'].eq(s['ROW_ID'])].iloc[0].get('ZoneColor', ZONE_COLORS["Outside"])
-                } for s in stops],
-                created_ts=time.time()
+            if "details" in (show_details or []):
+                for j, s in enumerate(stops, 1):
+                    lines.append(
+                        f"\n**Stop {j}: {s.name}**  \n"
+                        f"({s.lat:.4f}, {s.lon:.4f}) · Postcode: `{s.postcode or '—'}`  \n"
+                        f"Zone: {s.ZoneLabel} · Operational: {'Yes' if s.Operational else 'No'}  \n"
+                        f"SoC: {int(100*s.soc_before)}% → {int(100*s.soc_after)}%  "
+                        f"(+{s.energy_kWh:.1f} kWh · ~{s.charge_time_min:.0f} min)"
+                    )
+
+            itinerary = dcc.Markdown("\n".join(lines))
+
+            # Draw route map with your existing helper
+            html_map = render_map_html_route(
+                full_line=LineString([(lon, lat) for (lat, lon) in coords]),
+                route_safe=None, route_risk=None,
+                start=coords[0], end=coords[-1],
+                chargers=[asdict(s) for s in stops],
+                all_chargers_df=gdf_ev, show_live_backdrops=False
             )
 
-            return html_str, itinerary_children, route_store
-
+            store = {
+                "start": {"lat": coords[0][0], "lon": coords[0][1]},
+                "end":   {"lat": coords[-1][0], "lon": coords[-1][1]},
+                "route": [{"lat": lat, "lon": lon} for (lat, lon) in coords],
+                "stops": [asdict(s) for s in stops],
+            }
+            return html_map, itinerary, store
         except Exception as e:
-            itinerary_children = dcc.Markdown(f"**Routing error:** {e}")
-            return render_map_html_ev(d, show_fraw, show_fmfp, show_live, show_ctx, light=light), itinerary_children, {}
+            error_html = f"<html><body style='font-family:sans-serif;padding:12px'>" \
+                         f"<h3>Routing failed</h3><pre style='white-space:pre-wrap'>{e}</pre>" \
+                         f"<p>Tip: ensure OSMnx & geospatial libs are installed, or allow egress to the OSRM/API endpoints.</p>" \
+                         f"</body></html>"
+            return error_html, html.Div(f"Routing failed: {e}"), dash.no_update
 
-    # EV overview
-    if (map_mode or "2d") == "3d":
-        html_str = render_map_html_ev_3d(d)
-    else:
-        html_str = render_map_html_ev(d, show_fraw, show_fmfp, show_live, show_ctx, light=light)
-    return html_str, itinerary_children, {}
 
+    # ---- Branch 2: overlays/filters (default) ----
+    show_fraw = "fraw" in (layer_vals or [])
+    show_fmfp = "fmfp" in (layer_vals or [])
+    show_live = "live" in (layer_vals or [])
+    show_ctx  = "ctx"  in (layer_vals or [])
+    light     = "on"   in (light_vals or [])
+
+    # filter your chargers dataframe per existing logic, then:
+    df_map = gdf_ev  # or your filtered subset
+    html_map = render_map_html_ev(df_map, show_fraw, show_fmfp, show_live, show_ctx, light=light)
+    return html_map, dash.no_update, dash.no_update
 
  
 # ============ KML Download ============
-@app.callback(
-    Output("dl-kml", "data"),
-    Input("btn-kml", "n_clicks"),
-    State("store-route", "data"),
-    prevent_initial_call=True
-)
-def _download_kml(_n, route_data):
-    if not route_data or not (route_data.get("route") and route_data.get("start") and route_data.get("end")):
-        return dash.no_update
-    kml = build_kml(route_data)
-    return dict(content=kml, filename="ev_journey.kml", type="application/vnd.google-earth.kml+xml")
-
-def simulate(n, sla, slo, ela, elo, batt, si, sres, stgt, kwhkm, pmax, show_leg_details, units):
-    if not HAS_OSMNX:
-        return go.Figure(), "OSMnx not available or not installed.", ""
-    try:
-        coords, stops, cost_min = plan_rcsp_route(
-            float(sla), float(slo), float(ela), float(elo),
-            EVParams(
-                battery_kWh=batt, start_soc=si, reserve_soc=sres,
-                target_soc=stgt, kWh_per_km=kwhkm, max_charge_kW=pmax
-            ),
-            extreme=False
-        )
-        if not coords or len(coords) < 2:
-            return go.Figure(), "No route could be computed. Check start/end.", ""
-        center = ((float(sla)+float(ela))/2, (float(slo)+float(elo))/2)
-        fig = make_fig_geo(coords, stops, center)
-        status = f"Exact RCSP route. Total generalised cost ≈ {cost_min:.1f} min; stops: {len(stops)}."
-        # Journey narrative (with per-leg SoC/energy)
-        use_miles = (units == "imperial")
-        dist_func = (lambda km: km*0.621371) if use_miles else (lambda km: km)
-        dist_unit = "mi" if use_miles else "km"
-        fmt_dist = lambda d: f"{dist_func(d):.1f} {dist_unit}"
-        fmt_kwh = lambda e: f"{e:.1f} kWh"
-        fmt_soc = lambda x: f"{int(100*x)}%"
-
-        journey = []
-        total_dist = 0.0
-        total_energy = 0.0
-        journey.append(f"**Start:** ({sla:.4f}, {slo:.4f}), SoC: {fmt_soc(si)}, Battery: {batt:.1f} kWh")
-        prev = (sla, slo)
-        prev_soc = si
-
-        # pair stops with the path: simple legs start->stop1->...->end
-        waypoints = [(s.lat, s.lon, s) for s in stops] + [(ela, elo, None)]
-        for i, (lt, ln, s) in enumerate(waypoints, 1):
-            leg_dist = haversine_km(prev[0], prev[1], lt, ln)
-            leg_energy = leg_dist * kwhkm
-            total_dist += leg_dist
-            total_energy += leg_energy
-            if show_leg_details and "details" in (show_leg_details or []):
-                journey.append(
-                    f"\n**Leg {i}**: {fmt_dist(leg_dist)} → ({lt:.4f},{ln:.4f})"
-                )
-            if s is not None:
-                pct_added = int(100 * (s.soc_after - s.soc_before))
-                journey.append(
-                    f"  - **Stop {i}: {s.name}** ({s.lat:.4f},{s.lon:.4f})"
-                    f"\n    Postcode: `{s.postcode}`"
-                    f"\n    Arrived {fmt_soc(s.soc_before)}; charged {fmt_kwh(s.energy_kWh)} "
-                    f"({pct_added}% of battery) in ~{s.charge_time_min:.0f} min; left {fmt_soc(s.soc_after)}."
-                )
-                prev = (s.lat, s.lon)
-                prev_soc = s.soc_after
-            else:
-                journey.append(f"\n**End:** ({ela:.4f}, {elo:.4f})")
-
-        journey.append(f"\n**Total distance:** {fmt_dist(total_dist)}")
-        journey.append(f"**Total drive energy:** {fmt_kwh(total_energy)}")
-        journey.append(f"**Total charging time:** {sum(s.charge_time_min for s in stops):.0f} min")
-        journey.append(f"**Number of charging stops:** {len(stops)}")
-
-        return fig, status, dcc.Markdown("\n\n".join(journey))
-    except Exception as e:
-        return go.Figure(), f"Route computation failed: {e}", ""
-    
-# -------------------------
-# Run
-# -------------------------
-
-# === EU BEV Filter UI additions ===
-from dash import dash_table
-import pandas as pd
-
-# =========================
-# Weather (Open-Meteo default; Met Office optional)
-
-
-CATEGORY_OPTIONS = [
-    "A Mini","B Small","C Medium","D Large",
-    "E Executive","F Luxury","S Sport","M Multi-purpose","J SUV"
-]
-CAR_TYPES_BY_CATEGORY = {
-    "A Mini": ["City car hatchback"],
-    "B Small": ["Hatchback","Small sedan","Small wagon"],
-    "C Medium": ["Hatchback","Sedan","Estate/Wagon","Liftback"],
-    "D Large": ["Mid-size sedan","Estate/Wagon","Liftback"],
-    "E Executive": ["Executive sedan","Executive wagon","Fastback","Grand tourer"],
-    "F Luxury": ["Luxury sedan","Luxury fastback","Limousine"],
-    "S Sport": ["Sports coupe","Roadster","Performance hatch","Supercar","Hypercar"],
-    "M Multi-purpose": ["MPV","Van-based MPV","Camper MPV","Van-based people carrier"],
-    "J SUV": ["Crossover","SUV","Coupe-SUV","Off-roader"]
-}
-
-def detect_numeric_cols(df):
-    name_map = {c: str(c).lower().strip() for c in df.columns}
-    batt_candidates = [c for c, n in name_map.items() if "batt" in n or "kwh" in n]
-    range_candidates = [c for c, n in name_map.items() if "range" in n]
-    def _pick(cands):
-        for c in cands:
-            try:
-                _ = df[c].astype(float)
-                return c
-            except Exception:
-                continue
-        return None
-    return _pick(batt_candidates), _pick(range_candidates)
-
-def bounds(series, default_min, default_max):
-    try:
-        s = series.astype(float)
-        return float(s.min()), float(s.max())
-    except Exception:
-        return default_min, default_max
-
-# Load EU BEVs
-bev_df_clean = pd.read_csv("EU-BEVs.csv")  # (Ensure file is in same folder or use full path)
-batt_col, range_col = detect_numeric_cols(bev_df_clean)
-batt_min, batt_max = bounds(bev_df_clean[batt_col], 0.0, 120.0) if batt_col else (0.0, 120.0)
-range_min, range_max = bounds(bev_df_clean[range_col], 0.0, 900.0) if range_col else (0.0, 900.0)
-
-# Add to app.layout (insert at the right place for your UI; here as an example section)
-if hasattr(app.layout, "children") and isinstance(app.layout.children, list):
-    app.layout.children.append(html.H2("EU Battery Electric Vehicles (BEV) Filter"))
-
-from functools import lru_cache
-@lru_cache(maxsize=128)
-                                           
-def cached_get(url, headers_tuple=(), params_tuple=()):
-    headers = dict(headers_tuple) if headers_tuple else {}
-    params = dict(params_tuple) if params_tuple else {}
-    r = requests.get(url, headers=headers, params=params, timeout=20)
-    r.raise_for_status()
-    return r.json()
-
-def _ts():
-    return str(int(time.time()//300))
-
-METOFFICE_KEY = os.environ.get("METOFFICE_KEY", "").strip()
-METOFFICE_SITE_API = os.environ.get("METOFFICE_SITE_API", "").strip()  # optional
-
-def get_weather(lat=51.48, lon=-3.18):
-    try:
-        if METOFFICE_KEY and METOFFICE_SITE_API:
-            headers = (("apikey", METOFFICE_KEY),)
-            params = (("latitude", str(lat)), ("longitude", str(lon)),)
-            data = cached_get(METOFFICE_SITE_API, headers, params)
-            return {"provider":"Met Office", "raw": data}
-        else:
-            url = "https://api.open-meteo.com/v1/forecast"
-            params = (
-                ("latitude", str(lat)), ("longitude", str(lon)),
-                ("current", "temperature_2m,precipitation,wind_speed_10m"),
-                ("hourly", "temperature_2m,precipitation_probability,wind_speed_10m"),
-                ("timezone", "Europe/London"),
-                ("_ts", _ts()),
-            )
-            data = cached_get(url, (), params)
-            return {"provider":"Open-Meteo", "raw": data}
-    except Exception as e:
-        return {"provider":"error", "error": str(e)}
-
-def _parse_metoffice_timeseries(raw):
-    try:
-        feats = raw.get("features") or []
-        if feats and isinstance(feats, list):
-            ts = feats[0].get("properties", {}).get("timeSeries") or []
-            times = [r.get("time") for r in ts if "time" in r][:24]
-            temps = [r.get("screenTemperature") for r in ts][:24]
-            pops  = [r.get("precipitationProbability") or r.get("precipProb") for r in ts][:24]
-            if times and temps:
-                return {"time": times, "temp": temps, "pop": pops or [None]*len(times)}
-    except Exception:
-        pass
-    return {}
-
-app.layout.children.append(
-    html.Div([
-        html.Label("Battery-Electric Vehicles (BEV) filter"),
-        html.Div([
-            html.Label("Category"),
-            dcc.Dropdown(
-                id="bev-category-dd",
-                options=[{"label": c, "value": c} for c in CATEGORY_OPTIONS],
-                placeholder="Select segment (A–J)",
-                clearable=True,
-                style={"minWidth": "400px"}
-            ),
-            html.Label("Car Type"),
-            dcc.Dropdown(
-                id="bev-cartype-dd",
-                options=[],
-                placeholder="Select car type",
-                clearable=True,
-                disabled=True,
-                style={"minWidth": "400px"}
-            ),
-        ], style={"display": "flex", "gap": "8em"})
-    ])
-)
-
-
-app.layout.children.append(html.Br())
-
-app.layout.children.append(
-    html.Div([
-        html.Label(f"Battery capacity ({batt_col if batt_col else 'not found'})"),
-        dcc.RangeSlider(
-            id="bev-batt-slider",
-            min=batt_min, max=batt_max, value=[batt_min, batt_max],
-            marks=None, tooltip={"placement": "bottom"}, disabled=not bool(batt_col)
-        ),
-    ], style={"margin": "8px 0"})
-)
-
-app.layout.children.append(
-    html.Div([
-        html.Label(f"Range ({range_col if range_col else 'not found'})"),
-        dcc.RangeSlider(
-            id="bev-range-slider",
-            min=range_min, max=range_max, value=[range_min, range_max],
-            marks=None, tooltip={"placement": "bottom"}, disabled=not bool(range_col)
-        ),
-    ], style={"margin": "8px 0"})
-)
-
-app.layout.children.append(
-    html.Div([
-        dash_table.DataTable(
-            id="bev-table",
-            data=bev_df_clean.to_dict("records"),
-            columns=[{"name": c, "id": c} for c in bev_df_clean.columns],
-            page_size=10, sort_action="native", filter_action="native",
-            style_table={"overflowX": "auto"},
-            style_cell={"fontFamily": "system-ui, sans-serif", "fontSize": "13px"}
-        )
-    ])
-)
 
 @app.callback(
     [Output("bev-cartype-dd", "options"), Output("bev-cartype-dd", "disabled")],
