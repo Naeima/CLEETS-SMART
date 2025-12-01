@@ -37,9 +37,62 @@ Contains Natural Resources Wales information © Natural Resources Wales and data
 
 ## Features  
 - **Live flood overlays** (FRAW, FMfP, NRW warnings).  
-- **EV journey simulator**: RCSP solver (battery-aware) + fallback OSRM routes.
-  ## Journey Simulator Steps
-  ![RCSP Solver](RCSP.jpg)
+- **CLEETS-SMART EV Routing Optimization Method: RCSP solver (battery-aware) + fallback OSRM routes.
+
+Electric-vehicle (EV) routing under flood conditions is formulated as an Exact Resource-Constrained  
+Shortest Path (RCSP) problem designed to mitigate *range anxiety*, defined as the driver’s concern  
+that the vehicle may not have sufficient energy to reach the next charger or destination. The road  
+network is represented as a directed graph \(G=(V,A)\) where each arc has attributes for driving  
+time, distance, and flood status. The optimization jointly minimizes travel time and charging time  
+while enforcing battery-feasibility constraints.
+
+- **Optimization Problem
+
+\[
+\begin{aligned}
+\min_{x,q}\quad   
+    &\sum_{a\in A}\big(t_a^{\mathrm{drive}} + \lambda d_a F_a\big) x_a
+    + \sum_{v\in C} t_v^{\mathrm{charge}}  \\
+\text{s.t.}\quad  
+    &q_j = q_i - \frac{\kappa d_a}{B},
+        &&\forall a=(i,j)\in A,\; x_a = 1, \\
+    &q_j \ge q_{\min},
+        &&\forall j\in V,\\
+    &t_v^{\mathrm{charge}} = 3600\,\frac{B(q_k-q_j)}{P_v},
+        &&\forall v\in C,\\
+    &\lambda >
+        \frac{\max_{P\in\mathcal{P}_0}\sum_{a\in P} t_a^{\mathrm{drive}} + 1}
+             {d_{\min}}, \\
+    &x_a\in\{0,1\},\quad q\in[0,1].
+\end{aligned}
+\]
+
+- **Variable definitions:**  
+- \(x_a\): arc-selection variable  
+- \(t_a^{\mathrm{drive}}\): driving time  
+- \(d_a\): distance  
+- \(F_a\): flood indicator  
+- \(\lambda\): flood-penalty coefficient  
+- \(q_i, q_j\): state of charge (SOC)  
+- \(\kappa\): energy-consumption rate  
+- \(B\): battery capacity  
+- \(q_{\min}\): minimum SOC  
+- \(P_v\): charger power  
+- \(t_v^{\mathrm{charge}}\): charging time  
+- \(C\): set of charger nodes  
+- \(\mathcal{P}_0\): set of unflooded paths  
+- \(d_{\min}\): minimum arc distance  
+
+- **How the Method Works
+
+Optimization is solved using a label-setting dynamic program that tracks both the vehicle’s location  
+and its battery level in an augmented state space \((v,q)\). Each label represents a possible state  
+of the journey, recording the node position and its SOC. Moving along a road segment reduces SOC  
+according to the energy-consumption model, while charging stations increase SOC following the  
+charging-time expression. Dominated labels—those slower or less energy efficient than another at the  
+same node—are pruned throughout the search. Flood-affected arcs are kept but given a large soft  
+penalty \(\lambda d_a F_a\), making them unattractive unless no unflooded option exists.
+
   
 1. **Build the road network**
    - Model the map as a graph $G=(V,E)$ with nodes $V$ (intersections/chargers) 
