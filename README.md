@@ -33,55 +33,8 @@ Contains Natural Resources Wales information © Natural Resources Wales and data
 
 ---
 
-## Features  
-- **Live flood overlays** (FRAW, FMfP, NRW warnings).  
-- **CLEETS-SMART EV Routing Optimization Method: RCSP solver (battery-aware) + fallback OSRM routes.
+## CLEETS-SMART EV Routing Optimization Method: RCSP solver (battery-aware) + fallback OSRM routes.
     ![CLEETS-EV Routing Optimization Method](CLEETS_ROUTING.png)
-
-  
-1. **Build the road network**
-   - Model the map as a graph $G=(V,E)$ with nodes $V$ (intersections/chargers) 
-     and edges $E$ (road segments).
-   - Each edge $e$ has: length $d_e$, driving time $t^{\mathrm{drive}}_e$, 
-     and a flood flag $F_e \in \{0,1\}$ (1 if flooded/penalized).
-
-2. **Energy model per edge**
-   - Energy used on edge $e$: $\Delta E_e = \kappa d_e$ (kWh), where $\kappa$ is 
-     average consumption (kWh/km).
-   - State of charge (SOC) update: $q' = q - \Delta E_e / B$, where $B$ is 
-     battery capacity (kWh).  
-     Enforce minimum reserve: $q' \ge q_{\min}$.
-
-3. **Travel cost per edge**
-   - Cost combines drive time and flood penalty:  
-     $c_e = t^{\mathrm{drive}}_e + \lambda d_e F_e$.  
-     Flooded edges ($F_e=1$) get an extra penalty proportional to length.
-
-4. **Charging decision at nodes**
-   - If SOC would drop below reserve before the next node, add a charging stop at node $v$.
-   - Charging time:  
-     $t^{\mathrm{chg}}(q,q';v) = \frac{B(q'-q)}{P_v}\times 3600$ seconds,  
-     where $P_v$ is charger power (kW) and 3600 converts hours → seconds.  
-     Enforce $q' \le 1$ and $q' \ge q$.
-
-5. **Route objective (RCSP)**
-   - Minimize total travel cost:  
-     $\min \sum_{e \in \text{path}} c_e + \sum_{\text{stops } v} t^{\mathrm{chg}}(q,q';v)$  
-     subject to SOC dynamics and reserve constraints.
-
-6. **Two ways to compute routes**
-   - (i) Use OSRM to compute a baseline route and time.  
-   - (ii) Solve an exact resource-constrained shortest path (RCSP) on OSMnx graphs 
-     to jointly optimize path and charging stops under SOC and flood penalties.
-
-7. **High-level workflow**
-   - Start with initial SOC $q_0$.  
-   - For each candidate path, propagate SOC (step 2), insert charging (step 4), 
-     and accumulate cost (steps 3 & 4).  
-   - RCSP picks the feasible path/charging plan with minimum cost while avoiding flooded edges.
-
-- **Weather forecasts** from Met Office/Open-Meteo, shown alongside maps.  
-- **Downloadable routes** with summaries of time, distance, charging stops, and risk level.  
 
 ---
 
