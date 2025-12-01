@@ -43,7 +43,6 @@ Contains Natural Resources Wales information © Natural Resources Wales and data
   
 - [Colab Notebook](https://colab.research.google.com/drive/1uw6xeN1H6tFmyBEMJUoxDH-qDAU7Hb9a?usp=sharing).
 
-- [Colab URL](https://colab.research.google.com/drive/1muu2wlGo1XIVPCUEs2xgWeyD_XuQ_r75?usp=sharing).
   
 ---
 
