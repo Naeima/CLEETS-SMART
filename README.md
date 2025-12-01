@@ -39,6 +39,8 @@ Contains Natural Resources Wales information © Natural Resources Wales and data
 - **Live flood overlays** (FRAW, FMfP, NRW warnings).  
 - **CLEETS-SMART EV Routing Optimization Method: RCSP solver (battery-aware) + fallback OSRM routes.
 
+# CLEETS-SMART EV Routing Optimization Method
+
 Electric-vehicle (EV) routing under flood conditions is formulated as an Exact Resource-Constrained  
 Shortest Path (RCSP) problem designed to mitigate *range anxiety*, defined as the driver’s concern  
 that the vehicle may not have sufficient energy to reach the next charger or destination. The road  
@@ -46,7 +48,7 @@ network is represented as a directed graph \(G=(V,A)\) where each arc has attrib
 time, distance, and flood status. The optimization jointly minimizes travel time and charging time  
 while enforcing battery-feasibility constraints.
 
-- **Optimization Problem
+## Optimization Problem
 
 \[
 \begin{aligned}
@@ -67,7 +69,7 @@ while enforcing battery-feasibility constraints.
 \end{aligned}
 \]
 
-- **Variable definitions:**  
+**Variable definitions:**  
 - \(x_a\): arc-selection variable  
 - \(t_a^{\mathrm{drive}}\): driving time  
 - \(d_a\): distance  
@@ -83,7 +85,7 @@ while enforcing battery-feasibility constraints.
 - \(\mathcal{P}_0\): set of unflooded paths  
 - \(d_{\min}\): minimum arc distance  
 
-- **How the Method Works
+# How the Method Works
 
 Optimization is solved using a label-setting dynamic program that tracks both the vehicle’s location  
 and its battery level in an augmented state space \((v,q)\). Each label represents a possible state  
