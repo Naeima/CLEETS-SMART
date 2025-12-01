@@ -95,6 +95,7 @@ charging-time expression. Dominated labels—those slower or less energy efficie
 same node—are pruned throughout the search. Flood-affected arcs are kept but given a large soft  
 penalty \(\lambda d_a F_a\), making them unattractive unless no unflooded option exists.
 
+
   
 1. **Build the road network**
    - Model the map as a graph $G=(V,E)$ with nodes $V$ (intersections/chargers) 
