@@ -34,7 +34,7 @@ Contains Natural Resources Wales information © Natural Resources Wales and data
 ---
 
 ## CLEETS-SMART EV Routing Optimization Method: RCSP solver (battery-aware) + fallback OSRM routes.
-    ![CLEETS-EV Routing Optimization Method](CLEETS_ROUTING.png)
+![CLEETS-EV Routing Optimization Method](CLEETS_ROUTING.png)
 
 ---
 
