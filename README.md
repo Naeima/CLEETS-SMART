@@ -16,9 +16,7 @@ A Dash + Folium web app that integrates:
 - **Chatbot explanations** for transparency and scenario testing.  
 
 Chargers are visualised with overlays for flood zones, live warnings, and weather impact.  
-
 ---
-
 ## Attribution  
 
 Contains Natural Resources Wales information © Natural Resources Wales and database right. All rights reserved. Some features of this information are based on digital spatial data licensed from the UK Centre for Ecology & Hydrology © UKCEH. Defra, Met Office and DARD Rivers Agency © Crown copyright. ©Cranfield University. © James Hutton Institute. Contains OS data © Crown copyright and database right.[Flood Risk Assessment Wales (FRAW)](https://datamap.gov.wales/layergroups/inspire-nrw:FloodRiskAssessmentWales) [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).    
@@ -38,7 +36,7 @@ Contains Natural Resources Wales information © Natural Resources Wales and data
 ## Features  
 - **Live flood overlays** (FRAW, FMfP, NRW warnings).  
 - **CLEETS-SMART EV Routing Optimization Method: RCSP solver (battery-aware) + fallback OSRM routes.
-    ![CLEETS-SMART Dashboard](CLEETS_ROUTING.png)
+    ![CLEETS-EV Routing Optimization Method](CLEETS_ROUTING.png)
 
   
 1. **Build the road network**
