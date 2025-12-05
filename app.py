@@ -1,9 +1,9 @@
-# CLEETS-SMART Dashboard 
+# CLEETS-SMART Dashboard
 # Idea is adapted from:
 # Naeima (2022). Correlation-between-Female-Fertility-and-Employment-Status.
 # GitHub repository: https://github.com/Naeima/Correlation-between-Female-Fertility-and-Employment-Status
 # Light/Incremental mode: fast startup with no WFS/WMS feature fetch until you opt in.
-# EV chargers + flood overlays + RCSP routing (optimised)
+# EV chargers + flood overlays + RCSP routing (optimized)
 
 
 import io, os, time, json, tempfile, requests, math, heapq
@@ -2243,7 +2243,7 @@ app.layout = html.Div(
         },
     ),
 
-        html.H2("C) EV Route Planner"),
+        html.H2("C) Journey Simulator (EV Route Planner)"),
         html.Div(
             [
                 html.Div(
@@ -3082,6 +3082,3 @@ def _wx_split(loc, _n):
 
 if __name__ == "__main__":
     app.run_server(debug=True)
-
-if __name__ == "__main__":
-    app.run(debug=True)
