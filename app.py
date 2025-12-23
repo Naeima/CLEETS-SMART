@@ -36,7 +36,66 @@ from folium.plugins import MarkerCluster, Draw, BeautifyIcon
 from folium.raster_layers import WmsTileLayer
 
 from osmnx.distance import nearest_nodes
+from dash import exceptions
+import os
+import gdown
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import xarray as xr
+import plotly.express as px
 
+
+def heat_colour(val, vmin=5, vmax=25):
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+    rgba = cm.get_cmap("inferno")(norm(val))
+    return mcolors.to_hex(rgba)
+
+def value_to_hex(val, vmin=5, vmax=25, cmap="inferno"):
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+    rgba = cm.get_cmap(cmap)(norm(val))
+    return mcolors.to_hex(rgba)
+
+# =========================
+# Heat datasets 
+# =========================
+
+DATA_DIR = "heat_data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+HEAT_DATASETS = {
+    "HEAT 2020–2030": {
+        "fid": "10O85ZkQOLcBBOjvYcFQsjjR0AYsVHiE_",
+        "path": os.path.join(DATA_DIR, "heat_2020_2030.nc"),
+    },
+    "HEAT 2030–2040": {
+        "fid": "1OOEUaevo0VVUE5MPZtFKrarfB0RK6Kec",
+        "path": os.path.join(DATA_DIR, "heat_2030_2040.nc"),
+    },
+    "HEAT 2040–2050": {
+        "fid": "128chSSQv_O9wiv_f3lBGppIQ3cGqGlPp",
+        "path": os.path.join(DATA_DIR, "heat_2040_2050.nc"),
+    },
+}
+
+# Download once if missing
+for label, meta in HEAT_DATASETS.items():
+    if not os.path.exists(meta["path"]):
+        gdown.download(
+            f"https://drive.google.com/uc?id={meta['fid']}",
+            meta["path"],
+            quiet=False,
+        )
+
+# Convenience lookup used by callbacks
+HEAT_FILES = {label: meta["path"] for label, meta in HEAT_DATASETS.items()}
+
+HEAT_TS_COLORS = {
+    "HEAT 2020–2030": "#1f77b4",  # blue
+    "HEAT 2030–2040": "#d62728",  # red
+    "HEAT 2040–2050": "#9467bd",  # purple
+}
 
 # =========================
 # Google Drive helpers
@@ -1245,7 +1304,6 @@ def add_wms_group(fmap, title_to_layer: dict, visible=True, opacity=0.55):
         except Exception:
             pass
 
-
 def add_base_tiles(m):
     folium.TileLayer(
         tiles="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -1317,7 +1375,6 @@ def make_beautify_icon(color_hex: str):
         inner_icon_style="font-size:22px;padding-top:2px;",
     )
 
-
 def _row_to_tooltip_html(row, title=None):
     s = f"<b>{title or 'Data Point'}</b><br>"
     for k, v in row.items():
@@ -1350,12 +1407,39 @@ def _thin_for_folium(
     if len(thinned) > max_points:
         thinned = thinned.sample(n=max_points, random_state=42)
     return thinned
+def add_heat_overlay(m, heat_data, vmin=5, vmax=25, opacity=0.55):
+    if not heat_data:
+        return
+
+    fg = folium.FeatureGroup(name="Heat (UKCP tas)", show=True)
+
+    lon = np.array(heat_data["lon"])
+    lat = np.array(heat_data["lat"])
+    z   = np.array(heat_data["z"])
+
+    for i in range(z.shape[0]):
+        for j in range(z.shape[1]):
+            val = z[i, j]
+            if not np.isfinite(val):
+                continue
+
+            folium.CircleMarker(
+                location=[lat[i, j], lon[i, j]],
+                radius=5,
+                fill=True,
+                fill_color=value_to_hex(val, vmin, vmax),
+                fill_opacity=opacity,
+                color=None,
+            ).add_to(fg)
+
+    fg.add_to(m)
 
 # =========================
 # Map rendering
 # =========================
 
-def render_map_html_ev(df_map, show_fraw, show_fmfp, show_live, show_ctx, light=False):
+def render_map_html_ev(df_map, show_fraw, show_fmfp, show_live, show_ctx,
+                       light=False, heat_data=None):
     if isinstance(df_map, gpd.GeoDataFrame):
         df_plot = pd.DataFrame(df_map.drop(columns=["geometry"], errors="ignore"))
     else:
@@ -1438,8 +1522,64 @@ def render_map_html_ev(df_map, show_fraw, show_fmfp, show_live, show_ctx, light=
         add_wms_group(m, CONTEXT_WMS, False, 0.45)
     if show_live:
         add_wms_group(m, LIVE_WMS, True, 0.65)
+    if heat_data:
+        add_heat_overlay(m, heat_data, vmin=5, vmax=25, opacity=0.55)
+    if show_live:
+        add_wms_group(m, LIVE_WMS, True, 0.65)
+    
+    # Heat overlay (UKCP tas)
+    if heat_data:
+        add_heat_overlay(
+        m,
+        heat_data,
+        vmin=5,
+        vmax=25,
+        opacity=0.55,
+    )
+    # temp_legend = """
+    # <div style="
+    # position: fixed;
+    # bottom: 20px;
+    # left: 360px;
+    # z-index: 9999;
+    # background: white;
+    # padding: 10px 12px;
+    # border: 1px solid #ccc;
+    # border-radius: 6px;
+    # font-size: 12px;">
+    # <b>Mean temperature (°C)</b><br>
+    # <div style="margin-top:6px">
+    # <span style="display:inline-block;width:14px;height:14px;
+    #         background:#000004;"></span> 5 °C<br>
+    # <span style="display:inline-block;width:14px;height:14px;
+    #         background:#420a68;"></span> 10 °C<br>
+    # <span style="display:inline-block;width:14px;height:14px;
+    #         background:#932567;"></span> 15 °C<br>
+    # <span style="display:inline-block;width:14px;height:14px;
+    #         background:#dd513a;"></span> 20 °C<br>
+    # <span style="display:inline-block;width:14px;height:14px;
+    #         background:#fca50a;"></span> 25 °C
+    # </div>
+    # </div>
+    # """
+    # m.get_root().html.add_child(folium.Element(temp_legend))
 
     folium.LayerControl(collapsed=True).add_to(m)
+    
+    heat_legend = """
+    <div style="position: fixed; bottom:20px; right:20px; z-index:9999;
+                background:white; padding:10px; border:1px solid #ccc;
+                border-radius:6px; font-size:13px;">
+    <b>Mean temperature (tas, °C)</b>
+    <div style="height:10px; background:linear-gradient(to right,
+    #000004,#1b0c41,#4a0c6b,#781c6d,#a52c60,#cf4446,#ed6925,#fb9b06,#f7d13d);
+    margin-top:6px;"></div>
+    <div style="display:flex; justify-content:space-between;">
+    <span>5</span><span>25</span>
+    </div>
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(heat_legend))
 
     legend_html = (
         f"<div style='position: fixed; bottom:20px; left:20px; z-index:9999; "
@@ -1456,7 +1596,6 @@ def render_map_html_ev(df_map, show_fraw, show_fmfp, show_live, show_ctx, light=
     )
     m.get_root().html.add_child(folium.Element(legend_html))
     return m.get_root().render()
-
 
 def render_map_html_route(
     full_line,
@@ -1575,12 +1714,11 @@ def render_map_html_route(
             tooltip=tooltip_obj,
             icon=make_beautify_icon(color_hex),
         ).add_to(cluster)
-
     if show_live_backdrops:
         add_wms_group(m, LIVE_WMS, visible=True, opacity=0.65)
-
+    
     folium.LayerControl(collapsed=True).add_to(m)
-
+    
     legend_html = """
     <div style="position: fixed; bottom:20px; left:20px; z-index:9999; background:white;
                 padding:10px 12px; border:1px solid #ccc; border-radius:6px; font-size:13px;">
@@ -1869,7 +2007,33 @@ app.layout = html.Div(
             },
         ),
 
-        html.H2("C) Journey Simulator (EV Route Planner)"),
+        html.H2("C) Heat (UK Temperature Predictions)"),
+
+        html.Div(
+            [
+                dcc.Dropdown(
+                    id="heat-period",
+                    options=[{"label": k, "value": k} for k in HEAT_FILES],
+                    value="HEAT 2020–2030",
+                    clearable=False,
+                    style={"width": "320px"},
+                )
+            ],
+            style={"marginBottom": "12px"},
+        ),
+ 
+        html.Div(
+            [
+                dcc.Graph(id="heat-timeseries"),
+            ],
+            style={
+                "display": "grid",
+                "gridTemplateRows": "3fr 2fr",
+                "gap": "12px",
+            },
+        ),
+
+        html.H2("D) Journey Simulator (EV Route Planner)"),
         html.Div(
             [
                 html.Div(
@@ -2149,6 +2313,7 @@ app.layout = html.Div(
         html.Div(id="itinerary", style={"marginTop": "12px"}),
         dcc.Store(id="zones-json", data=preload_zones_json()),
         dcc.Store(id="store-route"),
+        dcc.Store(id="heat-store"),
         dcc.Download(id="dl-kml"),
     ]
 )
@@ -2165,7 +2330,6 @@ def _update_si_label(v):
         return f"{int(100 * float(v))}%"
     except Exception:
         return "–"
-
 
 @app.callback(
     Output("sres-label", "children"),
@@ -2213,6 +2377,148 @@ def _compute_zones(_n):
     return zones[["ROW_ID", "ZoneLabel", "ZoneColor"]].to_json(orient="records")
 
 @app.callback(
+    Output("heat-store", "data"),
+    Output("heat-timeseries", "figure"),
+    Input("heat-period", "value"),
+)
+
+def update_heat(period_label):
+
+    if period_label is None:
+        raise exceptions.PreventUpdate
+
+    ds = xr.open_dataset(HEAT_FILES[period_label], engine="netcdf4")
+
+    # ---- interactive time series ----
+    tas_ts = ds["tas"].mean(
+        dim=[
+            "projection_x_coordinate",
+            "projection_y_coordinate",
+            "ensemble_member",
+        ],
+        skipna=True,
+    )
+
+    ts_df = tas_ts.to_dataframe(name="tas").reset_index()
+
+    # colour by period (stable & obvious)
+    PERIOD_COLOURS = {
+    "HEAT 2020–2030": "#1f77b4",
+    "HEAT 2030–2040": "#ff7f0e",
+    "HEAT 2040–2050": "#d62728",
+    }
+    line_colour = PERIOD_COLOURS.get(period_label, "#333333")
+
+#     ts_fig = go.Figure()
+
+#     ts_fig.add_trace(
+#     go.Scatter(
+#         x=ts_df["time"],
+#         y=ts_df["tas"],
+#         mode="lines",
+#         line=dict(color=line_colour, width=2),
+#         hovertemplate=(
+#             "<b>Date:</b> %{x}<br>"
+#             "<b>tas:</b> %{y:.2f} °C<br>"
+#             "<extra></extra>"
+#         ),
+#         name=period_label,
+#     )
+# )
+
+#     ts_fig.update_layout(
+#     title=(
+#         f"{period_label} – Daily mean near-surface air temperature (tas) "
+#         "averaged over the UK land domain"
+#     ),
+#     hovermode="x unified",
+#     xaxis_title="Time (360-day calendar)",
+#     yaxis_title="tas (°C)",
+#     margin=dict(l=50, r=20, t=60, b=40),
+# )
+
+    # --- interactive time series (FINAL, SINGLE FIGURE) ---
+    ts_fig = px.line(
+    ts_df,
+    x="time",
+    y="tas",
+    title=(
+        f"{period_label} – Daily mean near-surface air temperature (tas) "
+        "averaged over the UK land domain"
+    ),
+)
+
+    ts_fig.update_traces(
+    line=dict(
+        color=HEAT_TS_COLORS.get(period_label, "#1f77b4"),
+        width=3,
+    ),
+    hovertemplate=(
+        "<b>Date:</b> %{x|%Y-%m-%d}<br>"
+        "<b>Day of year:</b> %{x|%j}<br>"
+        "<b>Temperature:</b> %{y:.2f} °C<br>"
+        "<extra></extra>"
+    ),
+)
+
+    ts_fig.update_layout(
+    hovermode="x unified",
+    xaxis_title="Date (360-day calendar)",
+    yaxis_title="tas (°C)",
+)
+
+    hovertemplate=(
+        "<b>Date:</b> %{x}<br>"
+        "<b>Temperature:</b> %{y:.2f} °C<br>"
+        "<extra></extra>"
+    ),
+
+    ts_fig.update_layout(
+    hovermode="x unified",
+    xaxis_title="Date (360-day calendar)",
+    yaxis_title="tas (°C)",
+    )
+
+    # ---- heat grid (DATA ONLY) ----
+    tas_map = (
+        ds["tas"]
+        .mean(dim=["time", "ensemble_member"], skipna=True)
+        .squeeze(drop=True)
+    )
+
+    heat_data = {
+        "lon": ds["grid_longitude"].values[::8, ::8].tolist(),
+        "lat": ds["grid_latitude"].values[::8, ::8].tolist(),
+        "z": tas_map.values[::8, ::8].tolist(),
+    }
+
+    return heat_data, ts_fig
+
+def render_heat_map(heat_data):
+
+    if not heat_data:
+        raise exceptions.PreventUpdate
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=heat_data["z"],
+            x=heat_data["lon"][0],   # longitude axis
+            y=[row[0] for row in heat_data["lat"]],  # latitude axis
+            colorscale="Inferno",
+            colorbar=dict(title="tas (°C)"),
+        )
+    )
+
+    fig.update_layout(
+        title="Mean near-surface temperature (tas)",
+        xaxis_title="Longitude",
+        yaxis_title="Latitude",
+        height=500,
+    )
+
+    return fig
+
+@app.callback(
     Output("map", "srcDoc"),
     Output("itinerary", "children"),
     Output("store-route", "data"),
@@ -2236,7 +2542,9 @@ def _compute_zones(_n):
     State("show_leg_details", "value"),
     State("units", "value"),
     State("map-mode", "value"),
-)
+    State("heat-store", "data"), 
+    )
+
 def _update_map(
     countrys,
     country_like,
@@ -2258,6 +2566,7 @@ def _update_map(
     show_leg_details,
     units,
     map_mode,
+    heat_store,
 ):
     light = "on" in (light_vals or [])
 
@@ -2498,8 +2807,16 @@ def _update_map(
         except Exception as e:
             itinerary_children = dcc.Markdown(f"**Routing error:** {e}")
             html_str = render_map_html_ev(
-                d, show_fraw, show_fmfp, show_live, show_ctx, light=light
+                d,
+                show_fraw,
+                show_fmfp,
+                show_live,
+                show_ctx,
+                light=light,
+                heat_data=heat_store,       
             )
+            if heat_store:
+                add_heat_overlay(m, heat_store)
             return html_str, itinerary_children, {}
 
     # No optimise yet: just charger map
@@ -2507,8 +2824,15 @@ def _update_map(
         html_str = render_map_html_ev_3d(d)
     else:
         html_str = render_map_html_ev(
-            d, show_fraw, show_fmfp, show_live, show_ctx, light=light
-        )
+        d,
+        show_fraw,
+        show_fmfp,
+        show_live,
+        show_ctx,
+        light=light,
+        heat_data=heat_store,   # <-- ADD THIS
+    )
+
     return html_str, itinerary_children, {}
 
 @app.callback(
